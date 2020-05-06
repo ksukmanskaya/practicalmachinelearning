@@ -1,30 +1,137 @@
 ---
-title: "JH Practical ML assignment"
+title: "JH Practical Machine Learning Assignment"
 author: "Ksenia Sukmanskaya"
-date: "5/5/2020"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(caret)
+library(dplyr)
+library(factoextra)
+
 ```
 
-## R Markdown
+## Executive Summary
+This project is aimed to show how different ML models work for solving classification task to predict how well a weight lifting activity was performed. Namley we're investigating the quality of the Unilateral Dumbbell Biceps Curl.
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+Possible outcomes:
+- **Class A:** exactly according to the specification
+- **Class B:** throwing the elbows to the front
+- **Class C:** lifting the dumbbell only halfway
+- **Class D:** lowering the dumbbell only halfway 
+- **Class E:** throwing the hips to the front 
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
 
-```{r cars}
-summary(cars)
-```
+## Exploratory Analysis
 
-## Including Plots
-
-You can also embed plots, for example:
-
+Load data
 ```{r pressure, echo=FALSE}
-plot(pressure)
+setwd('/Users/Ksenia/Documents/__personal/Coursera/JH_DS_Specialization/Practical_ML/')
+training = read.csv('pml-training.csv', sep=',', row.names=1, na.strings = c('NA', '', '#DIV/0!'))
+testing = read.csv('pml-testing.csv', sep=',', row.names=1, na.strings = c('NA', '', '#DIV/0!'))
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Look up outcome distribution:
+```{r}
+table(training$classe)
+```
+
+1. Remove unnecessary variables:
+```{r}
+training <- training[,-which(names(training) %in% 
+                                     c('user_name', 
+                                       'raw_timestamp_part_1',
+                                       'raw_timestamp_part_2',
+                                       'cvtd_timestamp',
+                                       'new_window',
+                                       'num_window')
+                                   )
+                     ]
+# # take subset of features:
+# # avg, var, stdev, max, min, amplitude, kurtosis, skewness
+# features <- names(training)[startsWith(names(training), c('avg',
+#                                                           'var',
+#                                                           'stdev',
+#                                                           'max',
+#                                                           'min',
+#                                                           'amplitude',
+#                                                           'kurtosis', 
+#                                                           'skewness')) == T]
+# 
+# names(training)[grep('^avg|var', names(training))]
+```
+
+2. Check how many NAs we have for ech variable:
+```{r}
+vars_to_drop <- c()
+for (f in names(training)){
+  na_cnt <- sum(is.na(training[,f]))
+  if (na_cnt > 0) {
+    vars_to_drop <- c(vars_to_drop, f)
+    print(paste0(f, '(NA cnt) : ', na_cnt, ';   % of NAs: ', round(mean(is.na(training[,f])),2)))
+  }
+}
+training <- training[, !(names(training) %in% vars_to_drop)]
+dim(training)
+
+```
+
+
+
+3. Clean data from nzv and highly correlated features:
+```{r}
+# nzv <- nearZeroVar(training)
+# training <- training[,-nzv]
+# dim(training)
+
+# correlation analysis
+corr_mat <- cor(training[, -53])
+library(corrplot)
+corrplot(corr_mat, order='hclust')
+
+# find attributes that are highly corrected (ideally >0.75)
+highlyCorrelated <- findCorrelation(corr_mat, cutoff=0.75, names=F)
+# print indexes of highly correlated attributes
+print(highlyCorrelated)
+dim(training[,-highlyCorrelated])
+training <- training[,-highlyCorrelated]
+
+corr_mat_clean <- cor(training[,-dim(training)[2]])
+corrplot(corr_mat_clean, order='hclust')
+
+
+# plot PCA 2d projection:
+x_train <- training[,-dim(training)[2]]
+y_train <- training$classe
+pca <- preProcess(x_train, center=T, scale=T, method = 'pca', pcaComp = 2)
+train_pca <- predict(pca, x_train)
+train_pca$classe <- y_train
+ggplot(train_pca, aes(PC1, PC2, color=classe)) + geom_point(size=0.4, alpha=0.5)
+```
+
+PCA
+```{r}
+res.pca <- prcomp(x_train, scale = F)
+
+fviz_pca_var(res.pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             )
+```
+
+
+```{r}
+library(Rtsne)
+res.tsne <- Rtsne(x_train, dims = 2, perplexity=30, verbose=TRUE, max_iter = 1000)
+df_tsne <- data.frame(res.tsne$Y)
+df_tsne$classe <- y_train
+ggplot(df_tsne, aes(X1, X2, color=classe)) + geom_point(size=0.4, alpha=0.5)
+```
+
+
+

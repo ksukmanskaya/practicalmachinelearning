@@ -1,5 +1,5 @@
 ---
-title: "Practical ML - course assignment"
+title: "JH Practical ML assignment"
 author: "Ksenia Sukmanskaya"
 date: "5/5/2020"
 output: html_document

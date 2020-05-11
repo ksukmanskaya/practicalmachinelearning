@@ -2,23 +2,26 @@
 title: "JH Practical Machine Learning Assignment"
 author: "Ksenia Sukmanskaya"
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
 ---
 
-```{r setup, include=FALSE}
+```{r setup, include=FALSE, echo=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(ggplot2)
 library(caret)
 library(dplyr)
 library(factoextra)
-
+library(data.table)
+library(corrplot)
+library(gridExtra)
 ```
 
 ## Executive Summary
-This project is aimed to show how different ML models work for solving classification task to predict how well a weight lifting activity was performed. Namley we're investigating the quality of the Unilateral Dumbbell Biceps Curl.
+This project is aimed to show how different ML models work for solving classification task to predict how well a weight lifting activity was performed. Namely we're investigating the quality of the Unilateral Dumbbell Biceps Curl.
 
 Possible outcomes:
+
 - **Class A:** exactly according to the specification
 - **Class B:** throwing the elbows to the front
 - **Class C:** lifting the dumbbell only halfway
@@ -29,109 +32,354 @@ Possible outcomes:
 ## Exploratory Analysis
 
 Load data
-```{r pressure, echo=FALSE}
-setwd('/Users/Ksenia/Documents/__personal/Coursera/JH_DS_Specialization/Practical_ML/')
-training = read.csv('pml-training.csv', sep=',', row.names=1, na.strings = c('NA', '', '#DIV/0!'))
-testing = read.csv('pml-testing.csv', sep=',', row.names=1, na.strings = c('NA', '', '#DIV/0!'))
-```
+```{r load_data, echo=T}
+training = read.csv('pml-training.csv', sep=',', row.names=1, 
+                    na.strings=c('NA', '', '#DIV/0!'))
+testing = read.csv('pml-testing.csv', sep=',', row.names=1, 
+                   na.strings=c('NA', '', '#DIV/0!'))
 
-Look up outcome distribution:
-```{r}
+# Look up outcome distribution:`
 table(training$classe)
 ```
 
-1. Remove unnecessary variables:
-```{r}
-training <- training[,-which(names(training) %in% 
-                                     c('user_name', 
-                                       'raw_timestamp_part_1',
-                                       'raw_timestamp_part_2',
-                                       'cvtd_timestamp',
-                                       'new_window',
-                                       'num_window')
-                                   )
-                     ]
-# # take subset of features:
-# # avg, var, stdev, max, min, amplitude, kurtosis, skewness
-# features <- names(training)[startsWith(names(training), c('avg',
-#                                                           'var',
-#                                                           'stdev',
-#                                                           'max',
-#                                                           'min',
-#                                                           'amplitude',
-#                                                           'kurtosis', 
-#                                                           'skewness')) == T]
-# 
-# names(training)[grep('^avg|var', names(training))]
-```
+According to data description found [here](http://web.archive.org/web/20170519033209/http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf) the initial idea of WLE was based sliding window feature extraction approach. Dataset in consideration consists of 159 columns, 6 of which are meta data (including user_name, time of experiment, and 2 fields with information about time window type and number). 
 
-2. Check how many NAs we have for ech variable:
-```{r}
-vars_to_drop <- c()
-for (f in names(training)){
-  na_cnt <- sum(is.na(training[,f]))
-  if (na_cnt > 0) {
-    vars_to_drop <- c(vars_to_drop, f)
-    print(paste0(f, '(NA cnt) : ', na_cnt, ';   % of NAs: ', round(mean(is.na(training[,f])),2)))
-  }
-}
-training <- training[, !(names(training) %in% vars_to_drop)]
-dim(training)
+(!)Due to the lack of data description, the following reasoning is based on subjective assumptions.
+
+It looks like $new\_window$ field indicate whether it is either a raw measurement of all the sensors or an aggregated statistics. This outcome is based on the number of missing values for all the features with suffixes like $min,\ max,\ kurtosis,\ etc.$, namely, all the rows with $new\_window=no$ have missing values in aggregated features.
+
+=> we can easily drop all the aggregated features, as only 2% of data observations have those values, this will be done automatically by removing all the columns with high number of missing values.
+
+### Data cleaning
+
+1. Split dataset into training and validation and remove unnecessary variables:
+```{r drop_vars}
+set.seed(123)
+inTrain <- createDataPartition(training$classe, p=0.6, list=F)
+valid_set <- training[-inTrain, ]
+user_name <- training[inTrain,]$user_name # save for later plots
+y_train <- training[inTrain, ]$classe
+x_train <- training[inTrain, ] %>% select(-classe)
+x_train <- 
+  x_train %>%
+  select(-all_of(c('user_name', 
+                   'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp',
+                   'new_window', 'num_window')
+                 )
+         )
 
 ```
 
+2. Drop 'NA' features (see description above)
+```{r drop_vars2}
+vars_to_drop <- which(apply(x_train, 2, function(x) {mean(is.na(x))}) > 0)
+x_train <- x_train %>% select(-all_of(vars_to_drop))
+dim(x_train)
+```
 
-
-3. Clean data from nzv and highly correlated features:
-```{r}
-# nzv <- nearZeroVar(training)
-# training <- training[,-nzv]
-# dim(training)
-
+3. Remove highly correlated features with threshold=0.75.
+```{r echo=FALSE}
 # correlation analysis
-corr_mat <- cor(training[, -53])
-library(corrplot)
-corrplot(corr_mat, order='hclust')
+corr_mat <- cor(x_train)
+# corrplot(corr_mat, order='hclust', title = 'Corrplot: all features')
 
 # find attributes that are highly corrected (ideally >0.75)
 highlyCorrelated <- findCorrelation(corr_mat, cutoff=0.75, names=F)
-# print indexes of highly correlated attributes
-print(highlyCorrelated)
-dim(training[,-highlyCorrelated])
-training <- training[,-highlyCorrelated]
+print(paste0('Number of highly correlated features removed: ', length(highlyCorrelated)))
+x_train <- x_train[,-highlyCorrelated]
 
-corr_mat_clean <- cor(training[,-dim(training)[2]])
-corrplot(corr_mat_clean, order='hclust')
+corr_mat_clean <- cor(x_train)
+# corrplot(corr_mat_clean, order='hclust', title = 'Corrplot: highly corr feats removed')
+```
 
+18 features have been removed => 34 remaining features.
 
+*Corrplots:* initial and clean, can be found in Appendix (Figure 2 & Figure 3)
+
+### PCA 2D projection - visual assessment
+Plot 2d projection of initial dataset on the first 2 principal components.
+```{r pca, echo=FALSE, fig.height=5, fig.width=15}
 # plot PCA 2d projection:
-x_train <- training[,-dim(training)[2]]
-y_train <- training$classe
-pca <- preProcess(x_train, center=T, scale=T, method = 'pca', pcaComp = 2)
+pca <- preProcess(x_train, method = c('center', 'scale', 'pca'), pcaComp = 2)
 train_pca <- predict(pca, x_train)
 train_pca$classe <- y_train
-ggplot(train_pca, aes(PC1, PC2, color=classe)) + geom_point(size=0.4, alpha=0.5)
+train_pca$user_name <- user_name
+p1 <- ggplot(train_pca, aes(PC1, PC2, color=classe)) + geom_point(size=0.4, alpha=0.5) +
+  ggtitle('PCA 2d projection, colored by "classe"')
+p2 <- ggplot(train_pca, aes(PC1, PC2, color=user_name)) + geom_point(size=0.4, alpha=0.5) +
+  ggtitle('PCA 2d projection, colored by "user_name"')
+grid.arrange(p1, p2, nrow = 1)
 ```
 
-PCA
-```{r}
-res.pca <- prcomp(x_train, scale = F)
+Here we can see an interesting picture:
 
-fviz_pca_var(res.pca,
-             col.var = "contrib", # Color by contributions to the PC
-             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
-             repel = TRUE     # Avoid text overlapping
-             )
+- the first figure (at the left) shows us 2d projection of the data on the first 2 PC - colored by outcome $classe$. Here we can see that outcomes are not separated => obviously, the fist 2 PC are not sufficient to fit classifier, but it is clearly seen that there are 5 distinct clusters.
+- the second figure (at the right) shows the same projection but colored by $user_name$. All the users except 2 are distinctively separated from each other, which tells us that they are different and $user_name$ in this case is a proxy to a user properties (e.g. gender, age, height, weight, level of fitness, etc.). Ideally, there should be as many such clusters as possible in order to make the model more generalizable.
+
+
+## Model fitting
+Fit different classification models using 5-fold cross-validation (for the sake of time consumption) to assess unbiased performance estimation of the classidier accuracy.
+
+Initial set up for training and storing final results:
+```{r fit_setup}
+train_control <- trainControl(method="cv", number=5, # 5-fold CV
+                              returnData=F) 
+models_cv_results <- data.frame(model=character(0),
+                                Accuracy=numeric(0),
+                                AccuracySD=numeric(0)) # dataframe with final results for each model
+```
+
+We'll be testing several classification models:
+
+- Multivariate logistic regresion
+- LDA
+- Decision tree
+- Random forest
+- K-nearest neighbors
+- Gradient boosting machines
+
+*All the code for models fitting can be found in .Rmd file*
+
+#### Multivariate Logistic regression + elasticnet regularization - validation set performance:
+```{r glmnet, echo=FALSE, warning=FALSE}
+# Multivariate logistic regression
+set.seed(42)
+# use default tuning parameter grid
+start <- Sys.time()
+fit_glmnet <- train(y=y_train, x=x_train, 
+                  method='glmnet',
+                  trControl=train_control,
+                  verbose=T,
+                  family='multinomial')
+time_elapsed_glmnet <- Sys.time() - start
+# print(time_elapsed_glmnet)
+# Time difference of 1.878701 mins
+
+# save cv results:
+write.csv(fit_glmnet$results, 'cv_results/glmnet_cv_results.csv')
+
+# save results to final dataframe for comparison
+res <- fit_glmnet$results[,c('Accuracy', 'AccuracySD')] %>% 
+  arrange(desc(Accuracy)) %>% 
+  mutate(model='glmnet') %>% 
+  select(model, Accuracy, AccuracySD)
+models_cv_results <- rbind(models_cv_results, res[1,])
+# print(fit_glmnet, showSD=T, selectCol=T, details=F)
+print(confusionMatrix(predict(fit_glmnet, valid_set), factor(valid_set$classe))$overall)
 ```
 
 
-```{r}
-library(Rtsne)
-res.tsne <- Rtsne(x_train, dims = 2, perplexity=30, verbose=TRUE, max_iter = 1000)
-df_tsne <- data.frame(res.tsne$Y)
-df_tsne$classe <- y_train
-ggplot(df_tsne, aes(X1, X2, color=classe)) + geom_point(size=0.4, alpha=0.5)
+#### LDA - validation set performance:
+```{r lda, echo=FALSE, warning=FALSE}
+# LDA
+set.seed(42)
+start <- Sys.time()
+fit_lda <- train(y=y_train, x=x_train, 
+                 method='lda',
+                 trControl=train_control,
+                 verbose=F)
+time_elapsed_lda <- Sys.time()-start
+# print(time_elapsed_lda)
+# Time difference of 2.963709 mins
+
+# save cv results:
+write.csv(fit_lda$results, 'cv_results/lda_cv_results.csv')
+
+# save results to final dataframe for comparison
+res <- fit_lda$results[,c('Accuracy', 'AccuracySD')] %>% 
+  arrange(desc(Accuracy)) %>% 
+  mutate(model='lda') %>% 
+  select(model, Accuracy, AccuracySD)
+models_cv_results <- rbind(models_cv_results, res[1,])
+
+# print(fit_lda, showSD=T, selectCol=T, details=F)
+print(confusionMatrix(predict(fit_lda, valid_set), factor(valid_set$classe))$overall)
+```
+
+
+#### Decision Tree - validation set performance:
+```{r decision_tree, echo=F, warning=FALSE}
+# Simple Decision Tree
+set.seed(42)
+tree_grid <- expand.grid(.cp=seq(0.001, 0.99, by = 0.01)) # tune tree parameter
+start <- Sys.time()
+fit_tree <- train(y=y_train, x=x_train, 
+                  method='rpart',
+                  trControl=train_control,
+                  tuneGrid=tree_grid
+                  )
+time_elapsed_tree <- Sys.time() - start
+# print(time_elapsed_tree)
+# Time difference of 3.921896 secs
+
+# save cv results:
+write.csv(fit_tree$results, 'cv_results/tree_cv_results.csv')
+
+# save results to final dataframe for comparison
+res <- fit_tree$results[,c('Accuracy', 'AccuracySD')] %>% 
+  arrange(desc(Accuracy)) %>% 
+  mutate(model='tree') %>% 
+  select(model, Accuracy, AccuracySD)
+models_cv_results <- rbind(models_cv_results, res[1,])
+
+# print(fit_tree, showSD=T, selectCol=T, details=F)
+print(confusionMatrix(predict(fit_tree, valid_set), factor(valid_set$classe))$overall)
+```
+
+#### Random Forest - validation set performance:
+```{r random_forest, echo=F, warning=FALSE}
+# Random Forest
+set.seed(42)
+rf_grid <- expand.grid(
+  .mtry=seq(5, dim(x_train)[2]%/%2, 2) # tune number of features for each tree
+  ) 
+start <- Sys.time()
+fit_rf <- train(y=y_train, x=x_train, 
+                method='rf',
+                trControl=train_control,
+                tuneGrid=rf_grid,
+                verbose=T, 
+                ntree=100) # set number of trees=100 for the sake of time 
+time_elapsed_rf <- Sys.time()-start
+# print(time_elapsed_rf)
+# Time difference of 4.850123 mins
+
+# save cv results:
+write.csv(fit_rf$results, 'cv_results/randomforest_cv_results.csv')
+
+# save results to final dataframe for comparison
+res <- fit_rf$results[,c('Accuracy', 'AccuracySD')] %>% 
+  arrange(desc(Accuracy)) %>% 
+  mutate(model='randomforest') %>% 
+  select(model, Accuracy, AccuracySD)
+models_cv_results <- rbind(models_cv_results, res[1,])
+
+# print(fit_rf, showSD=T, selectCol=T, details=F)
+print(confusionMatrix(predict(fit_rf, valid_set), factor(valid_set$classe))$overall)
+```
+
+
+#### KNN - validation set performance:
+```{r knn, echo=F, warning=FALSE}
+# K-Nearest Neighbors
+set.seed(42)
+knn_grid <- expand.grid(.k=c(2,3,4,5,7,9,10,15,20)) # tune number of neighbors
+start <- Sys.time()
+fit_knn <- train(y=y_train, x=x_train, 
+                      method='knn',
+                      trControl=train_control, 
+                      tuneGrid=knn_grid)
+time_elapsed_knn <- Sys.time()-start
+# print(time_elapsed_knn)
+# Time difference of 2.188186 mins
+
+# save cv results:
+write.csv(fit_knn$results, 'cv_results/knn_cv_results.csv')
+
+# save results to final dataframe for comparison
+res <- fit_knn$results[,c('Accuracy', 'AccuracySD')] %>% 
+  arrange(desc(Accuracy)) %>% 
+  mutate(model='knn') %>% 
+  select(model, Accuracy, AccuracySD)
+models_cv_results <- rbind(models_cv_results, res[1,])
+
+# print(fit_knn, showSD=T, selectCol=T, details=F)
+print(confusionMatrix(predict(fit_knn, valid_set), factor(valid_set$classe))$overall)
+```
+
+
+#### GBM - validation set performance:
+```{r gbm, echo=F, warning=FALSE}
+# GBM
+set.seed(42)
+# use default tuning parameter grid
+start <- Sys.time()
+fit_gbm <- train(y=y_train, x=x_train, 
+                      method='gbm',
+                      trControl=train_control,
+                      verbose=F)
+time_elapsed_gbm <- Sys.time()-start
+# print(time_elapsed_gbm)
+# Time difference of 4.009376 mins
+
+# save cv results:
+write.csv(fit_gbm$results, 'cv_results/gbm_cv_results.csv')
+
+# save results to final dataframe for comparison
+res <- fit_gbm$results[,c('Accuracy', 'AccuracySD')] %>% 
+  arrange(desc(Accuracy)) %>% 
+  mutate(model='gbm') %>% 
+  select(model, Accuracy, AccuracySD)
+models_cv_results <- rbind(models_cv_results, res[1,])
+
+# print(fit_gbm, showSD=T, selectCol=T, details=F)
+print(confusionMatrix(predict(fit_gbm, valid_set), factor(valid_set$classe))$overall)
 ```
 
 
 
+## Conclusion
+
+- Several models have been tested on clean data set, optimal parametes were assessed using 5-fold cross-validation.
+- Final mean CV accuracy for each model in consideration:
+```{r show_final_results, echo=FALSE}
+# save final results
+write.csv(models_cv_results, 'models_final_results.csv')
+# show final results
+models_cv_results %>% arrange(desc(Accuracy))
+```
+
+
+- Models performance on independent validation set:
+```{r velidation_set_results, echo=FALSE}
+data.frame(model=c('glmnet', 'lda', 'tree', 'randomforest', 'knn', 'gbm'),
+           validation_set_acc= c(
+             confusionMatrix(predict(fit_glmnet, valid_set), factor(valid_set$classe))$overall[[1]],
+             confusionMatrix(predict(fit_lda, valid_set), factor(valid_set$classe))$overall[[1]],
+             confusionMatrix(predict(fit_tree, valid_set), factor(valid_set$classe))$overall[[1]],
+             confusionMatrix(predict(fit_rf, valid_set), factor(valid_set$classe))$overall[[1]],
+             confusionMatrix(predict(fit_knn, valid_set), factor(valid_set$classe))$overall[[1]],
+             confusionMatrix(predict(fit_gbm, valid_set), factor(valid_set$classe))$overall[[1]]
+           ))
+```
+
+- According to the final results table, the best model is **randomForest**, as it has the highest CV accuracy (this is also confirmed on validation set)
+- Best model results on a validation set (full):
+```{r best_model_valid_set_perf}
+confusionMatrix(predict(fit_rf, valid_set), factor(valid_set$classe))
+```
+
+- Predict outcome for a testset:
+```{r testset_prediction}
+predict(fit_rf, testing)
+```
+
+**Note:** speaking of production implementation of the final algorithm, I would also consider training/prediction time.
+
+\newpage
+# Appendix
+
+<!-- ```{r getlabels, echo = FALSE} -->
+<!-- labs = knitr::all_labels() -->
+<!-- labs = labs[!labs %in% c("setup", "toc", "getlabels", "allcode", -->
+<!--                          # 'glmnet', 'lda', 'decision_tree', -->
+<!--                          # 'random_forest', 'svm_linear', 'knn', -->
+<!--                          # 'gbm', 'xgb', -->
+<!--                          'show_final_results', 'corrplot1' ,'corrplot2') -->
+<!--             ] -->
+<!-- ``` -->
+
+#### Corrplot: initial data
+```{r corrplot1}
+corrplot(corr_mat, order='hclust', title = 'Corrplot: all features')
+```
+
+
+### Corrplot: clean data
+```{r corrplot2}
+corrplot(corr_mat_clean, order='hclust', title = 'Corrplot: highly corr feats removed')
+```
+
+
+<!-- ```{r allcode, ref.label = labs, eval = FALSE, echo=T, fig.show='asis'} -->
+<!-- ``` -->
